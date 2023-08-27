@@ -286,30 +286,40 @@ function extractKnowledgeGraph(searchResult) {
 async function generateResult(companyName, website, row, prompt) {
   try {
     console.log(companyName, website, row);
-    let systemMessage = `Please write a company profile consisting a of between 500 and 800 words for the company named at the end of this prompt. Please follow the following commands 
+    //     let systemMessage = `Please write a company profile for the company named at the end of this prompt. Please follow the following commands
 
-Please write in a formal business like style 
-Please write in 3rd person
-Please write giving factual information only. Do not use unnecessary words. 
-Please write in English
-While you are generating, always provide exact answers.
-Do not provide a summary at the end 
+    // Please write in a formal business like style
+    // Please write in 3rd person
+    // Please write in English
+    // While you are generating, always provide exact answers.
+    // Do not provide a summary at the end
 
-While you are generating, please make sure following things.
-###
-${prompt}
-###
+    // While you are generating, please make sure following things.
+    // ###
+    // ${prompt}
+    // ###
 
+    // The company to write about is ${companyName}
+    // And the company's website is ${website}
+
+    // I will provide you some informations about the company.
+    // `;
+    let systemMessage = `
+I want you to act as a helpful assistant to write the overview about companies.
 The company to write about is ${companyName}
 And the company's website is ${website}
 
-I will provide you some informations about the company.`;
+I will provide you some useful informations about company,
+`;
     let additionalSys = [];
     let searchResult = await search(companyName);
     let knowledgeGraph = extractKnowledgeGraph(searchResult);
     let htmlTxt = await getRawInformationFromUrl(website);
+    htmlTxt = htmlTxt.replace("\\t", "");
+    htmlTxt = htmlTxt.replace("\\n", "");
+
     if (htmlTxt.length > 25000) {
-      htmlTxt = htmlTxt.substring(0, 25000);
+      htmlTxt = htmlTxt.substring(0, 20000);
     }
 
     if (knowledgeGraph !== false) {
@@ -391,25 +401,36 @@ ${htmlTxt}
     for (let m of additionalSys) {
       mes.push({ role: "system", content: m });
     }
+    // console.log("====");
+    let prompt_new =
+      prompt +
+      `
+While you are generating, always provide useful informations as much as possible, such as founded date, location, etc if they are provided before.
+`;
+    console.log(row);
     mes.push({
       role: "system",
-      content: `Write an overview based on these informations. While you are writing only provide correct informations. Do not use templates with [].
-For example,
+      content: prompt_new,
+      //       content: `Write an overview based on the informations I provided.
+      // When you are writing only provide correct answers from the information I provided.
+      // If the company is investment company, please be factual and not be creative or fluffy
+      // If there's somethings that are not provided above, do not generate any answer related that.
 
-Wrong answers:
-The company was founded in [year].
-This company is headquatered in [location of company].
-[number of years] of experience.
+      // While you are writing only provide actual informations. Do not use templates with [].
 
-correct answers:
-The company was founded in 1992.
-This company is headquatered in Washington, DC.
-5 of experience.
+      // For example,
 
-And while you are generating do not be "creative" or "fluffy", must be "factual".
-`,
+      // Wrong answers:
+      // The company was founded in [year].
+      // This company is headquatered in [location of company].
+      // [number of years] of experience.
+
+      // correct answers:
+      // The company was founded in 1992.
+      // This company is headquatered in Washington, DC.
+      // 5 of experience.
+      // `,
     });
-
     const chatCompletionRequest = {
       //   model: "gpt-3.5-turbo-16k-0613",
       model: "gpt-4-0613",
@@ -426,7 +447,8 @@ And while you are generating do not be "creative" or "fluffy", must be "factual"
         },
       }
     );
-    // console.log(response.data.choices[0].message.content);
+    console.log(row);
+    console.log(response.data.choices[0].message.content);
     updateSpreadsheet(
       row,
       "A",
@@ -435,7 +457,7 @@ And while you are generating do not be "creative" or "fluffy", must be "factual"
     );
     //   return response.data.choices[0].message.content;
   } catch (err) {
-    // console.log(err);
+    console.log(err);
   }
 }
 
@@ -450,7 +472,7 @@ async function main() {
   for (let i = 0; i < Math.ceil(urlList.length / parallel); i++) {
     const slice = urlList.slice(parallel * i, parallel * (i + 1));
     const requests = slice.map((url, index) =>
-      generateResult(url[0], url[1], i * parallel + index + 2, prompt)
+      generateResult(url[0], url[1], i * parallel + index + 2, prompt[1][0])
     );
     await Promise.allSettled(requests);
   }
