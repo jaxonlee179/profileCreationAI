@@ -26,6 +26,7 @@ const inputSheetName = process.env.INPUTSHEETNAME;
 const outputSheetName = process.env.OUTPUTSHEETNAME;
 const openaiApiKey = process.env.OPENAIAPIKEY;
 const ZENROWSAPIKEY = process.env.ZENROWSAPIKEY;
+const serpApiKey = process.env.GOOGLEAPIKEY;
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
 
 const client = new ZenRows(ZENROWSAPIKEY, {
@@ -35,6 +36,20 @@ const client = new ZenRows(ZENROWSAPIKEY, {
 axiosRetry(axios, { retries: 3, retryDelay: axiosRetry.exponentialDelay });
 
 let linkedinResults = [];
+async function search(query) {
+  const params = {
+    q: query,
+    location: "Austin, Texas, United States",
+    hl: "en",
+    gl: "us",
+    google_domain: "google.com",
+    api_key: serpApiKey,
+  };
+
+  const response = await axios.get("https://serpapi.com/search", { params });
+  return response.data;
+}
+
 async function testGetSpreadSheet() {
   try {
     const auth = await getAuthToken();
@@ -409,12 +424,21 @@ async function main() {
   const data = await testGetSpreadSheetValues(inputSheetName);
   const prompt = await testGetSpreadSheetValues(promptSheetName);
   const urlList = data.slice(1).map((el) => {
-    return [el[0]];
+    return [el[0], el[1]];
   });
+  let linkedinUrls = [];
+  for (url in urlList) {
+    const result = await search(`linkedin ${url[0]} ${url[1]}`);
+    linkedinUrls.push([result["organic_results"][0]["link"]]);
+  }
+  const result = await search(
+    "sourcebreaker https://www.sourcebreaker.com/ linkedin"
+  );
+  console.log();
   const time = new Date().getTime();
 
-  for (let i = 0; i < Math.ceil(urlList.length / parallel); i++) {
-    const slice = urlList.slice(parallel * i, parallel * (i + 1));
+  for (let i = 0; i < Math.ceil(linkedinUrls.length / parallel); i++) {
+    const slice = linkedinUrls.slice(parallel * i, parallel * (i + 1));
     const requests = slice.map((url, index) =>
       generateResult(url[0], i * parallel + index + 2, prompt[1][0])
     );
