@@ -427,7 +427,7 @@ async function main() {
     return [el[0], el[1]];
   });
   let linkedinUrls = [];
-  for (url in urlList) {
+  for (const url of urlList) {
     const result = await search(`linkedin ${url[0]} ${url[1]}`);
     linkedinUrls.push([result["organic_results"][0]["link"]]);
   }
