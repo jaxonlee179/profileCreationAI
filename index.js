@@ -431,10 +431,6 @@ async function main() {
     const result = await search(`linkedin ${url[0]} ${url[1]}`);
     linkedinUrls.push([result["organic_results"][0]["link"]]);
   }
-  const result = await search(
-    "sourcebreaker https://www.sourcebreaker.com/ linkedin"
-  );
-  console.log();
   const time = new Date().getTime();
 
   for (let i = 0; i < Math.ceil(linkedinUrls.length / parallel); i++) {
