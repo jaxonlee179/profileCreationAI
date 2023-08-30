@@ -3,6 +3,9 @@ const cors = require("cors");
 const axios = require("axios");
 const cheerio = require("cheerio");
 const axiosRetry = require("axios-retry");
+const { ZenRows } = require("zenrows");
+const retry = require("async-retry");
+
 const {
   getAuthToken,
   getSpreadSheet,
@@ -21,12 +24,17 @@ const spreadsheetId = process.env.SPREADSHEETID;
 const promptSheetName = process.env.PROMPTSHEETNAME;
 const inputSheetName = process.env.INPUTSHEETNAME;
 const outputSheetName = process.env.OUTPUTSHEETNAME;
-
 const openaiApiKey = process.env.OPENAIAPIKEY;
-const serpApiKey = process.env.GOOGLEAPIKEY;
+const ZENROWSAPIKEY = process.env.ZENROWSAPIKEY;
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
 
+const client = new ZenRows(ZENROWSAPIKEY, {
+  concurrency: parallel,
+  retries: 1,
+});
 axiosRetry(axios, { retries: 3, retryDelay: axiosRetry.exponentialDelay });
 
+let linkedinResults = [];
 async function testGetSpreadSheet() {
   try {
     const auth = await getAuthToken();
@@ -121,75 +129,6 @@ async function updateRangeSpreadsheet(range, values) {
   }
 }
 
-async function search(query) {
-  const params = {
-    q: query,
-    location: "Austin, Texas, United States",
-    hl: "en",
-    gl: "us",
-    google_domain: "google.com",
-    api_key: serpApiKey,
-  };
-
-  const response = await axios.get("https://serpapi.com/search", { params });
-  return response.data;
-}
-
-function cleanWebsite(website) {
-  if (website) {
-    website = website.replace("https://", "");
-    website = website.replace("http://", "");
-    website = website.split("/")[0];
-    return website.toLowerCase();
-  } else {
-    return false;
-  }
-}
-
-async function rephraseSearch(company, website) {
-  website = cleanWebsite(website);
-  if (website) {
-    website = website.replace("www", "");
-    website = website.split(".");
-    let final = company + " ";
-    for (let word of website) {
-      if (
-        word.toLowerCase() !== "" &&
-        word.toLowerCase() !== "com" &&
-        word.toLowerCase() !== company.toLowerCase()
-      ) {
-        final += word;
-        final += " ";
-      }
-    }
-    const searchResult = await search(final);
-    const knowledgeGraph = extractKnowledgeGraph(searchResult);
-    return knowledgeGraph;
-  } else {
-    return false;
-  }
-}
-
-function extractProfile(knowledgeGraph) {
-  const result = {};
-  const bannedKeys = ["tabs", "directions", "profiles"];
-  for (let key in knowledgeGraph) {
-    if (
-      !key.includes("link") &&
-      !key.includes("id") &&
-      !key.includes("map") &&
-      !key.includes("hours") &&
-      !key.includes("reviews") &&
-      !key.includes("people_also_search_for") &&
-      !key.includes("__") &&
-      !bannedKeys.includes(key)
-    ) {
-      result[key] = knowledgeGraph[key];
-    }
-  }
-  return result;
-}
-
 function removeNavigationElements(html) {
   const $ = cheerio.load(html);
   $('[id*="navigation"]').remove();
@@ -215,221 +154,227 @@ async function getHtml(url) {
 }
 
 async function getRawInformationFromUrl(url) {
-  if (url) {
-    if (!url.includes("http")) {
-      url = "https://" + url;
-    }
-    let tem = url.split("//");
-    if (tem.length > 1) {
-      url = tem[0] + "//" + tem[1].split("/")[0];
-    }
-    console.log(url);
-    try {
-      let { html, status } = await getHtml(url);
+  try {
+    let { html, status } = await getHtml(url);
 
-      if (status === 200) {
-        let removed = removeHeader(html);
-        removed = removeNavigationElements(removed);
-        let result = extractText(removed);
-        return result;
-      } else {
-        if (tem[0].toLowerCase() === "http:") {
-          url = "https://" + tem[1].split("/")[0];
-          let { html, status } = await getHtml(url);
-          if (status === 200) {
-            return html;
-          }
-        } else if (tem[0].toLowerCase() === "https:") {
-          url = "http://" + tem[1].split("/")[0];
-          let { html, status } = await getHtml(url);
-          if (status === 200) {
-            return html;
-          }
-        }
-        return false;
-      }
-    } catch {
+    if (status === 200) {
+      let removed = removeHeader(html);
+      removed = removeNavigationElements(removed);
+      let result = extractText(removed);
+      return result;
+    } else {
       return false;
     }
-  } else {
+  } catch {
     return false;
   }
 }
 
-function extractKnowledgeGraph(searchResult) {
-  if ("knowledge_graph" in searchResult) {
-    let knowledgeGraph = searchResult["knowledge_graph"];
-    if ("title" in knowledgeGraph) {
-      if (knowledgeGraph["title"] === "See results about") {
-        return false;
-      } else {
-        return extractProfile(knowledgeGraph);
-      }
-    } else {
-      if (Object.keys(knowledgeGraph).length > 5) {
-        return extractProfile(knowledgeGraph);
-      } else {
-        return false;
-      }
-    }
-  } else {
-    return false;
-  }
-}
+const extractLinks = (plainHtml, url) => {
+  const $ = cheerio.load(plainHtml);
+  let links = [];
+  $("a").each((i, link) => {
+    links.push($(link).attr("href"));
+  });
 
-// The profile should be split up as follows
+  const filteredLinks = links.filter((link) => link.includes(url));
+  return filteredLinks;
+};
 
-// 1. Overview - please write a quick summary of what the company does. Please be sure to state year it was founded, where the company is headquartered and high level overview of what it does
+const extractLinkedin = async (url) => {
+  const run = async (bail, attemptNumber) => {
+    return await client
+      .get(url, { js_render: true, premium_proxy: true })
+      .then((response) => {
+        let result = [];
+        const $ = cheerio.load(response.data);
+        const employees = $(
+          'a[data-tracking-control-name="org-employees_cta_face-pile-cta"]'
+        );
+        if (employees.length) {
+          const string = employees.text().trim();
+          const prefix = "View all ";
+          const suffix = " employees";
 
-// 2. Overview of Product and Services - please list out the core products and services and write a summary on each one
+          const extractedString = string.substring(
+            prefix.length,
+            string.length - suffix.length
+          );
+          result[4] = extractedString;
+        }
 
-async function generateResult(companyName, website, row, prompt) {
-  try {
-    console.log(companyName, website, row);
-    //     let systemMessage = `Please write a company profile for the company named at the end of this prompt. Please follow the following commands
+        const name = $("h1");
+        if (name.length) result[0] = name.text().trim();
 
-    // Please write in a formal business like style
-    // Please write in 3rd person
-    // Please write in English
-    // While you are generating, always provide exact answers.
-    // Do not provide a summary at the end
+        const purpose = $("h4");
+        if (purpose.length) result[10] = purpose.text().trim();
 
-    // While you are generating, please make sure following things.
-    // ###
-    // ${prompt}
-    // ###
+        const about = $('p[data-test-id="about-us__description"]');
+        if (about.length) result[11] = about.text().trim();
 
-    // The company to write about is ${companyName}
-    // And the company's website is ${website}
+        const website = $('div[data-test-id="about-us__website"] a');
+        if (website.length) result[1] = website.text().trim();
+        const industries = $('div[data-test-id="about-us__industries"] dd');
+        if (industries.length) result[2] = industries.text().trim();
+        const size = $('div[data-test-id="about-us__size"] dd');
+        if (size.length) result[3] = size.text().trim();
+        const headquarters = $('div[data-test-id="about-us__headquarters"] dd');
+        if (headquarters.length) result[6] = headquarters.text().trim();
+        const type = $('div[data-test-id="about-us__organizationType"] dd');
+        if (type.length) result[7] = type.text().trim();
+        const speciality = $('div[data-test-id="about-us__specialties"] dd');
+        if (speciality.length) result[8] = speciality.text().trim();
+        const founded = $('div[data-test-id="about-us__foundedOn"] dd');
+        if (founded.length) result[12] = founded.text().trim();
+        const addresses = $("#address-0 p");
 
-    // I will provide you some informations about the company.
-    // `;
-    let systemMessage = `
-I want you to act as a helpful assistant to write the overview about companies.
-The company to write about is ${companyName}
-And the company's website is ${website}
+        if (addresses.length) {
+          result[5] = addresses.text().trim().split(", ").slice(-1)[0];
+          result[9] = addresses.text().trim();
+        }
 
-I will provide you some useful informations about company,
-`;
-    let additionalSys = [];
-    let searchResult = await search(companyName);
-    let knowledgeGraph = extractKnowledgeGraph(searchResult);
-    let htmlTxt = await getRawInformationFromUrl(website);
-    htmlTxt = htmlTxt.replace("\\t", "");
-    htmlTxt = htmlTxt.replace("\\n", "");
-
-    if (htmlTxt.length > 25000) {
-      htmlTxt = htmlTxt.substring(0, 20000);
-    }
-
-    if (knowledgeGraph !== false) {
-      if ("website" in knowledgeGraph) {
-        if (cleanWebsite(knowledgeGraph["website"]) === cleanWebsite(website)) {
-          let knowledgeMessage = `This is the company information from google search.
-###
-${JSON.stringify(knowledgeGraph)}
-###`;
-          additionalSys.push(knowledgeMessage);
-          if (htmlTxt !== false) {
-            let websiteMessage = `This is the company information from the company's website
-###
-${htmlTxt}
-###`;
-            additionalSys.push(websiteMessage);
-          }
+        linkedinResults = result;
+      })
+      .catch((error) => {
+        if (error.response && error.response.status === 429) {
+          // HTTP status code for quota limit reached
+          throw error;
         } else {
-          if (htmlTxt !== false) {
-            let websiteMessage = `This is the company information from the company's website
-###
-${htmlTxt}
-###`;
-            additionalSys.push(websiteMessage);
-            let newKnowledge = await rephraseSearch(companyName, website);
-            if (newKnowledge !== false) {
-              if (
-                cleanWebsite(newKnowledge["website"]) === cleanWebsite(website)
-              ) {
-                let knowledgeMessage = `This is the company information from google search.
-###
-${JSON.stringify(newKnowledge)}
-###`;
-                additionalSys.push(knowledgeMessage);
-              }
-            }
-          }
+          bail(error); // If not a rate limit error, don't retry and throw an error
         }
-      } else {
-        let newKnowledge = await rephraseSearch(companyName, website);
-        if (newKnowledge !== false) {
-          if (cleanWebsite(newKnowledge["website"]) === cleanWebsite(website)) {
-            let knowledgeMessage = `This is the company information from google search.
-###
-${JSON.stringify(newKnowledge)}
-###`;
-            additionalSys.push(knowledgeMessage);
-          }
-        }
-        if (htmlTxt !== false) {
-          let websiteMessage = `This is the company information from the company's website
-###
-${htmlTxt}
-###`;
-          additionalSys.push(websiteMessage);
-        }
-      }
-    } else {
-      let newKnowledge = await rephraseSearch(companyName, website);
-      if (newKnowledge !== false) {
-        if (cleanWebsite(newKnowledge["website"]) === cleanWebsite(website)) {
-          let knowledgeMessage = `This is the company information from google search.
-###
-${JSON.stringify(newKnowledge)}
-###`;
-          additionalSys.push(knowledgeMessage);
-        }
-      }
-      if (htmlTxt !== false) {
-        let websiteMessage = `This is the company information from the company's website
-###
-${htmlTxt}
-###`;
-        additionalSys.push(websiteMessage);
-      }
+        console.log(error.data);
+      });
+  };
+  try {
+    // Use the async-retry library to retry the HTTP request if error 429 is received
+    await retry(run, {
+      retries: 5, // The maximum amount of times to retry the operation Default is 10
+      factor: 2, // The exponential factor to use Default is 2
+      minTimeout: 1000, // The number of milliseconds before starting the first retry Default is 1000
+      maxTimeout: Infinity, // The maximum number of milliseconds between two retries Default is Infinity
+      randomize: true, // Randomizes the timeouts by multiplying a factor between 1-2 Default is false
+      onRetry: (error, attemptNumber) =>
+        console.log(`Retrying request... Attempt number: ${attemptNumber}`), // Called each time a retry is made.
+    });
+  } catch (err) {
+    console.error("Request failed after 5 retries:", err);
+  }
+};
+
+const createLinkedinSentence = async (url) => {
+  await extractLinkedin(url);
+  let linkedinSentence = "";
+  if (linkedinResults[0]) {
+    linkedinSentence += "The company name is " + linkedinResults[0] + ". ";
+  }
+  if (linkedinResults[1]) {
+    linkedinSentence += "The company's website is " + linkedinResults[1] + ". ";
+  }
+  if (linkedinResults[2]) {
+    linkedinSentence +=
+      "The company's industry is " + linkedinResults[2] + ". ";
+  }
+  if (linkedinResults[3]) {
+    linkedinSentence += "The company has between " + linkedinResults[3] + ". ";
+  }
+  if (linkedinResults[5]) {
+    linkedinSentence +=
+      "The company's nationality is " + linkedinResults[5] + ". ";
+  }
+  if (linkedinResults[6]) {
+    linkedinSentence +=
+      "The company is headquartered in " + linkedinResults[6] + ". ";
+  }
+  if (linkedinResults[7]) {
+    linkedinSentence += "The company type is " + linkedinResults[7] + ". ";
+  }
+  if (linkedinResults[8]) {
+    linkedinSentence +=
+      "The company's speciality is " + linkedinResults[8] + ". ";
+  }
+  if (linkedinResults[9]) {
+    linkedinSentence += "The company's address is " + linkedinResults[9] + ". ";
+  }
+  if (linkedinResults[10]) {
+    linkedinSentence += "The company's role is " + linkedinResults[10] + ". ";
+  }
+  if (linkedinResults[11]) {
+    linkedinSentence +=
+      "Here's an overview of the company. " + linkedinResults[11] + ". ";
+  }
+  if (linkedinResults[12]) {
+    linkedinSentence +=
+      "The company was founded in " + linkedinResults[12] + ". ";
+  }
+  return [linkedinSentence, linkedinResults[1], linkedinResults[0]];
+};
+
+const contentFromFiltering = async (filteredLinks) => {
+  let content = "";
+  for (const link of filteredLinks) {
+    const result = await getRawInformationFromUrl(link);
+    content += result;
+  }
+  return content;
+};
+
+const generateResult = async (url, row, prompt) => {
+  try {
+    let sentence = "",
+      website = "",
+      companyName = "";
+    const result = await createLinkedinSentence(url);
+
+    sentence = result[0];
+    website = result[1];
+    companyName = result[2];
+    // let { html, status } = await getHtml(website);
+    // let filteredLinks = [];
+    // if (status === 200) {
+    //   filteredLinks = extractLinks(html, website);
+    // }
+
+    let websiteContent = await getRawInformationFromUrl(website);
+    // const resultFromFiltering = await contentFromFiltering(filteredLinks);
+    // websiteContent += resultFromFiltering;
+    websiteContent = websiteContent.replace(/\s+/g, " ");
+    // console.log(
+    //   filteredLinks,
+    //   websiteContent,
+    //   websiteContent.length,
+    //   websiteContent.split(" ").length
+    // );
+
+    sentence = sentence.replace(/\s+/g, " ");
+    // console.log("-------");
+    // console.log(sentence, sentence.length, sentence.split(" ").length, website);
+
+    let systemMessage = `
+    I want you to act as a helpful assistant to write the overview about companies.
+    The company to write about is ${companyName}
+
+    I will provide you some useful informations about company.
+    `;
+    let additionalSys = [];
+    let mes = [{ role: "system", content: systemMessage }];
+    if (sentence) {
+      sentence = "This is the Linkedin profile of the company.\n" + sentence;
+      mes.push({ role: "system", content: sentence });
+    }
+    if (websiteContent) {
+      websiteContent =
+        "This is the content from the official website of company. \n" +
+        websiteContent;
+      mes.push({ role: "system", content: websiteContent });
     }
 
-    let mes = [{ role: "system", content: systemMessage }];
-    for (let m of additionalSys) {
-      mes.push({ role: "system", content: m });
-    }
-    // console.log("====");
     let prompt_new =
       prompt +
-      `
-While you are generating, always provide useful informations as much as possible, such as founded date, location, etc if they are provided before.
-`;
-    console.log(row);
+      "While you are generating, always provide useful informations as much as possible, such as founded date, location, etc if they are provided before.";
+
     mes.push({
       role: "system",
       content: prompt_new,
-      //       content: `Write an overview based on the informations I provided.
-      // When you are writing only provide correct answers from the information I provided.
-      // If the company is investment company, please be factual and not be creative or fluffy
-      // If there's somethings that are not provided above, do not generate any answer related that.
-
-      // While you are writing only provide actual informations. Do not use templates with [].
-
-      // For example,
-
-      // Wrong answers:
-      // The company was founded in [year].
-      // This company is headquatered in [location of company].
-      // [number of years] of experience.
-
-      // correct answers:
-      // The company was founded in 1992.
-      // This company is headquatered in Washington, DC.
-      // 5 of experience.
-      // `,
     });
     const chatCompletionRequest = {
       //   model: "gpt-3.5-turbo-16k-0613",
@@ -447,32 +392,31 @@ While you are generating, always provide useful informations as much as possible
         },
       }
     );
-    console.log(row);
-    console.log(response.data.choices[0].message.content);
+
     updateSpreadsheet(
       row,
       "A",
       response.data.choices[0].message.content,
       outputSheetName
     );
-    //   return response.data.choices[0].message.content;
+    // return response.data.choices[0].message.content;
   } catch (err) {
     console.log(err);
   }
-}
+};
 
 async function main() {
   const data = await testGetSpreadSheetValues(inputSheetName);
   const prompt = await testGetSpreadSheetValues(promptSheetName);
   const urlList = data.slice(1).map((el) => {
-    return [el[0], el[1]];
+    return [el[0]];
   });
   const time = new Date().getTime();
 
   for (let i = 0; i < Math.ceil(urlList.length / parallel); i++) {
     const slice = urlList.slice(parallel * i, parallel * (i + 1));
     const requests = slice.map((url, index) =>
-      generateResult(url[0], url[1], i * parallel + index + 2, prompt[1][0])
+      generateResult(url[0], i * parallel + index + 2, prompt[1][0])
     );
     await Promise.allSettled(requests);
   }
@@ -480,7 +424,7 @@ async function main() {
 
   console.log("Time => ", last - time);
 }
-
+// main();
 app.get("/api/execute", async (req, res) => {
   await main();
   res.json({ message: "GET request to /api/execute was successful" });
